@@ -1542,6 +1542,7 @@ class LEVELDESIGN_OT_visible_object_select(Operator):
             self._original_verts = {
                 i: self._object.data.vertices[i].co.copy() for i in self._face_verts
             }
+            self._capture_resize_uvs()
             other = [
                 self._object.matrix_world @ vert.co
                 for vert in self._object.data.vertices
@@ -1675,6 +1676,7 @@ class LEVELDESIGN_OT_visible_object_select(Operator):
         for index, original in self._original_verts.items():
             self._object.data.vertices[index].co = original + local_delta
         self._object.data.update()
+        self._update_resize_uvs()
         _, _, verts, center, _ = _face_world_data(self._object, self._face_index)
         _set_object_overlay(context, verts, (self._anchor, center), active=True)
         return {'RUNNING_MODAL'}
@@ -1683,6 +1685,62 @@ class LEVELDESIGN_OT_visible_object_select(Operator):
         for index, co in self._original_verts.items():
             self._object.data.vertices[index].co = co
         self._object.data.update()
+        self._update_resize_uvs(restore=True)
+
+    def _capture_resize_uvs(self):
+        from ...core.uv_layers import get_unlocked_uv_layers
+        from ...core.uv_projection import compute_uv_projection_from_face
+
+        bm = bmesh.new()
+        try:
+            bm.from_mesh(self._object.data)
+            moved = set(self._face_verts)
+            layers = get_unlocked_uv_layers(bm, self._object, self._object.data)
+            self._resize_uvs = []
+            for face in bm.faces:
+                if not moved.intersection(vert.index for vert in face.verts):
+                    continue
+                face_layers = {}
+                for layer in layers:
+                    projection = compute_uv_projection_from_face(face, layer)
+                    if projection:
+                        face_layers[layer.name] = (
+                            projection,
+                            [loop[layer].uv.copy() for loop in face.loops],
+                        )
+                if face_layers:
+                    self._resize_uvs.append((face.index, face_layers))
+        finally:
+            bm.free()
+
+    def _update_resize_uvs(self, restore=False):
+        if not self._resize_uvs:
+            return
+        from ...core.uv_projection import apply_uv_projection_to_face
+
+        me = self._object.data
+        bm = bmesh.new()
+        try:
+            bm.from_mesh(me)
+            bm.normal_update()
+            bm.faces.ensure_lookup_table()
+            for index, face_layers in self._resize_uvs:
+                if index >= len(bm.faces):
+                    continue
+                face = bm.faces[index]
+                for name, (projection, original) in face_layers.items():
+                    layer = bm.loops.layers.uv.get(name)
+                    if layer is None:
+                        continue
+                    if restore:
+                        for loop, uv in zip(face.loops, original):
+                            loop[layer].uv = uv
+                    else:
+                        apply_uv_projection_to_face(face, layer, *projection)
+            bm.to_mesh(me)
+            me.update()
+        finally:
+            bm.free()
 
     def _move_cursor_value(self, context, mouse, vertical):
         origin = self._move_anchor + self._move_base_offset
